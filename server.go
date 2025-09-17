@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -18,12 +17,6 @@ func main() {
 
 	if !exist {
 		log.Fatal("TARGET not set in .env")
-	}
-
-	port, exist := os.LookupEnv("PORT")
-
-	if !exist {
-		log.Fatal("PORT not set in .env")
 	}
 
 	remote, err := url.Parse(target)
@@ -46,9 +39,9 @@ func main() {
 		proxy.ServeHTTP(w, r)
 	})
 
-	log.Println("Proxify running on :" + port)
+	log.Println("Proxify running on :8888")
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), nil); err != nil {
+	if err := http.ListenAndServe(":8888", nil); err != nil {
 		log.Fatal(err)
 	}
 }
