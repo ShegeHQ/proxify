@@ -4,11 +4,13 @@ A lightweight reverse proxy with IP whitelisting for accessing private services 
 
 ## What It Does
 
-Simple HTTP reverse proxy that forwards requests from whitelisted IPs to private backend services. Perfect for accessing databases, APIs, or staging environments in private subnets without VPNs or complex networking.
+HTTP reverse proxy and raw TCP proxy that forward traffic from whitelisted IPs to private backend services. Perfect for accessing databases, caches, APIs, or staging environments in private subnets without VPNs or complex networking.
 
 ```
 Your IP → Proxify (Public) → Private Service (VPC)
 ```
+
+Supports HTTP(S) backends and raw TCP backends (e.g. Redis / ElastiCache, including TLS upstream for ElastiCache Serverless).
 
 ## Common Use Cases
 
@@ -62,8 +64,31 @@ The proxy will start on port 8888 and forward requests to your target.
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
-| `TARGET` | Yes | The backend service URL to proxy to | `http://10.0.1.50:3000` |
+| `TARGET` | One of | HTTP backend URL (enables HTTP proxy on `:8888`) | `http://10.0.1.50:3000` |
+| `REDIS_TARGET` | One of | TCP backend `host:port` (enables TCP proxy) | `sticky-xxx.serverless.euw2.cache.amazonaws.com:6379` |
+| `REDIS_TLS` | No | Set to `true` to dial upstream over TLS (required for ElastiCache Serverless) | `true` |
+| `REDIS_LISTEN` | No | Listen address for the TCP proxy (default `:6379`) | `:6380` |
 | `WHITELIST` | No | Comma-separated list of allowed IPs/CIDRs | `192.168.1.0/24,10.0.0.5` |
+
+At least one of `TARGET` or `REDIS_TARGET` must be set. Both can run simultaneously.
+
+### Redis / ElastiCache example
+
+```bash
+REDIS_TARGET=sticky-tyyqxu.serverless.euw2.cache.amazonaws.com:6379
+REDIS_TLS=true
+WHITELIST=203.0.113.0/24
+```
+
+Then connect from a whitelisted machine:
+
+```bash
+redis-cli -h <proxify-host> -p 6379 --user <iam-user> --pass <token>
+```
+
+The client still needs valid ElastiCache credentials — proxify forwards bytes only, it does not authenticate on your behalf.
+
+> **Deployment note:** AWS App Runner only exposes a single HTTP port, so the TCP listener will not be reachable there. For Redis/TCP proxying, deploy on EC2, Compute Engine, or behind an NLB.
 
 ### Whitelist Format
 
