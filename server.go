@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -15,44 +17,109 @@ import (
 func main() {
 	_ = godotenv.Load()
 
-	target, exist := os.LookupEnv("TARGET")
+	whitelist, _ := os.LookupEnv("WHITELIST")
+	allowed := allowedIPs(whitelist)
 
-	if !exist {
-		log.Fatal("TARGET not set in .env")
+	httpStarted := false
+
+	if target, ok := os.LookupEnv("TARGET"); ok {
+		go startHTTPProxy(target, allowed)
+		httpStarted = true
 	}
 
-	whitelist, _ := os.LookupEnv("WHITELIST")
+	if redisTarget, ok := os.LookupEnv("REDIS_TARGET"); ok {
+		redisTLS := strings.EqualFold(os.Getenv("REDIS_TLS"), "true")
+		listen := os.Getenv("REDIS_LISTEN")
+		if listen == "" {
+			listen = ":6379"
+		}
+		go startTCPProxy(listen, redisTarget, redisTLS, allowed)
+		httpStarted = true
+	}
 
+	if !httpStarted {
+		log.Fatal("Set TARGET (HTTP) and/or REDIS_TARGET (TCP) in env")
+	}
+
+	select {}
+}
+
+func startHTTPProxy(target string, allowed []string) {
 	remote, err := url.Parse(target)
-
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(remote)
-
 	originalDirector := proxy.Director
-
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		req.Host = remote.Host
 	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if !isAllowedIP(getClientIP(r), allowedIPs(whitelist)) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if !isAllowedIP(getClientIP(r), allowed) {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-
 		log.Printf("%s %s", r.Method, r.URL.String())
 		proxy.ServeHTTP(w, r)
 	})
 
-	log.Println("Proxify running on :8888")
-
-	if err := http.ListenAndServe(":8888", nil); err != nil {
+	log.Println("Proxify HTTP running on :8888 →", target)
+	if err := http.ListenAndServe(":8888", mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func startTCPProxy(listen, target string, useTLS bool, allowed []string) {
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Proxify TCP running on %s → %s (tls=%v)", listen, target, useTLS)
+
+	for {
+		client, err := ln.Accept()
+		if err != nil {
+			log.Printf("accept error: %v", err)
+			continue
+		}
+		go handleTCP(client, target, useTLS, allowed)
+	}
+}
+
+func handleTCP(client net.Conn, target string, useTLS bool, allowed []string) {
+	defer client.Close()
+
+	clientIP, _, err := net.SplitHostPort(client.RemoteAddr().String())
+	if err != nil {
+		return
+	}
+	if !isAllowedIP(clientIP, allowed) {
+		log.Printf("TCP rejected: %s", clientIP)
+		return
+	}
+	log.Printf("TCP %s → %s", clientIP, target)
+
+	var upstream net.Conn
+	if useTLS {
+		host, _, _ := net.SplitHostPort(target)
+		upstream, err = tls.Dial("tcp", target, &tls.Config{ServerName: host})
+	} else {
+		upstream, err = net.Dial("tcp", target)
+	}
+	if err != nil {
+		log.Printf("dial upstream %s: %v", target, err)
+		return
+	}
+	defer upstream.Close()
+
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(upstream, client); done <- struct{}{} }()
+	go func() { io.Copy(client, upstream); done <- struct{}{} }()
+	<-done
 }
 
 func allowedIPs(whitelist string) []string {
@@ -97,7 +164,6 @@ func getClientIP(r *http.Request) string {
 		}
 	}
 
-	// Fallback: use RemoteAddr
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
